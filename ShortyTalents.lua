@@ -19,7 +19,6 @@ ST.ACTIVITIES = {
   "Arena",
 }
 
-
 -- =========================
 -- Debug
 -- =========================
@@ -124,7 +123,7 @@ local function GetConfigName(configID)
 end
 
 -- Returns:
---   configID, displayName, isSaved
+--   configID, displayName, isSaved, usedSaved
 -- isSaved=true when active configID is one of the spec's SAVED loadouts.
 -- We intentionally rely on the ACTIVE config (not "last selected saved") because Blizzard may return nil for
 -- GetLastSelectedSavedConfigID even when the UI shows a named loadout.
@@ -161,6 +160,7 @@ local function GetCurrentLoadout()
 
   return activeID, name, isSaved, false
 end
+
 -- -----------------------------
 -- Activity detection
 -- -----------------------------
@@ -231,8 +231,8 @@ local function CheckTalentsNow(reason)
     return
   end
 
-local inInst, instType = IsInInstance()
-dprint("CheckTalentsNow", "reason=", reason, "activity=", activity, "IsInInstance=", inInst, "instanceType=", instType)
+  local inInst, instType = IsInInstance()
+  dprint("CheckTalentsNow", "reason=", reason, "activity=", activity, "IsInInstance=", inInst, "instanceType=", instType)
 
   local specID = GetCurrentSpecID()
   if not specID then
@@ -240,8 +240,8 @@ dprint("CheckTalentsNow", "reason=", reason, "activity=", activity, "IsInInstanc
     return
   end
 
-local _, specName = GetSpecializationInfoByID(specID)
-dprint("specID=", specID, "specName=", specName or "?")
+  local _, specName = GetSpecializationInfoByID(specID)
+  dprint("specID=", specID, "specName=", specName or "?")
 
   EnsureDB()
   local specDB = EnsureSpecDB(specID)
@@ -250,39 +250,39 @@ dprint("specID=", specID, "specName=", specName or "?")
     return
   end
 
-local activeID = C_ClassTalents.GetActiveConfigID and C_ClassTalents.GetActiveConfigID() or nil
-local activeName = activeID and ((C_Traits.GetConfigInfo(activeID) or {}).name) or nil
-local lastSavedID = C_ClassTalents.GetLastSelectedSavedConfigID and C_ClassTalents.GetLastSelectedSavedConfigID(specID) or nil
-local lastSavedName = (lastSavedID and lastSavedID > 0) and ((C_Traits.GetConfigInfo(lastSavedID) or {}).name) or nil
+  local activeID = C_ClassTalents.GetActiveConfigID and C_ClassTalents.GetActiveConfigID() or nil
+  local activeName = activeID and ((C_Traits.GetConfigInfo(activeID) or {}).name) or nil
+  local lastSavedID = C_ClassTalents.GetLastSelectedSavedConfigID and C_ClassTalents.GetLastSelectedSavedConfigID(specID) or nil
+  local lastSavedName = (lastSavedID and lastSavedID > 0) and ((C_Traits.GetConfigInfo(lastSavedID) or {}).name) or nil
 
--- Cache/restore last known saved loadout. Blizzard may report nil during TRAIT_CONFIG_UPDATED.
-if lastSavedID and lastSavedID > 0 then
-  lastKnownSavedIDBySpec[specID] = lastSavedID
-else
-  local cached = lastKnownSavedIDBySpec[specID]
-  if cached and cached > 0 then
-    dprint("lastSelectedSavedID is nil; using cached savedID=", cached)
-    lastSavedID = cached
-    lastSavedName = ((C_Traits.GetConfigInfo(lastSavedID) or {}).name) or lastSavedName
-  elseif reason == "talents_updated" then
-    -- Avoid false positives during talent update before saved selection is available.
-    dprint("talents_updated with no lastSelectedSavedID yet; skipping warning this tick.")
-    return
+  -- Cache/restore last known saved loadout. Blizzard may report nil during TRAIT_CONFIG_UPDATED.
+  if lastSavedID and lastSavedID > 0 then
+    lastKnownSavedIDBySpec[specID] = lastSavedID
+  else
+    local cached = lastKnownSavedIDBySpec[specID]
+    if cached and cached > 0 then
+      dprint("lastSelectedSavedID is nil; using cached savedID=", cached)
+      lastSavedID = cached
+      lastSavedName = ((C_Traits.GetConfigInfo(lastSavedID) or {}).name) or lastSavedName
+    elseif reason == "talents_updated" then
+      -- Avoid false positives during talent update before saved selection is available.
+      dprint("talents_updated with no lastSelectedSavedID yet; skipping warning this tick.")
+      return
+    end
   end
-end
 
-dprint("activeID=", activeID or "nil", "activeName=", activeName or "nil")
-dprint("lastSelectedSavedID=", lastSavedID or "nil", "lastSelectedSavedName=", lastSavedName or "nil")
+  dprint("activeID=", activeID or "nil", "activeName=", activeName or "nil")
+  dprint("lastSelectedSavedID=", lastSavedID or "nil", "lastSelectedSavedName=", lastSavedName or "nil")
 
-local savedList = DumpSavedConfigsForSpec(specID)
-if #savedList == 0 then
-  dprint("Saved configs list is EMPTY for this spec.")
-else
-  dprint("Saved configs for spec:")
-  for _, it in ipairs(savedList) do
-    dprint(" -", it.name, "(ID:", tostring(it.id) .. ")")
+  local savedList = DumpSavedConfigsForSpec(specID)
+  if #savedList == 0 then
+    dprint("Saved configs list is EMPTY for this spec.")
+  else
+    dprint("Saved configs for spec:")
+    for _, it in ipairs(savedList) do
+      dprint(" -", it.name, "(ID:", tostring(it.id) .. ")")
+    end
   end
-end
 
   local selectedID, selectedName, isSaved, usedSaved = GetCurrentLoadout()
   if not selectedID then
@@ -303,7 +303,6 @@ end
     return
   end
 
-
   -- If rules exist but player isn't on a saved loadout, warn clearly.
   -- Only call it Starter/Unsaved when we did NOT have a lastSelectedSavedID to use.
   if (not isSaved) and (not usedSaved) then
@@ -322,6 +321,27 @@ end
 ST.CheckTalentsNow = CheckTalentsNow
 
 -- -----------------------------
+-- Scheduled check (debounce to avoid race conditions)
+-- -----------------------------
+local pendingTimer = nil
+local pendingReason = nil
+
+local function ScheduleCheck(reason, delay)
+  delay = delay or 0.10
+  pendingReason = reason
+
+  if pendingTimer then
+    pendingTimer:Cancel()
+    pendingTimer = nil
+  end
+
+  pendingTimer = C_Timer.NewTimer(delay, function()
+    pendingTimer = nil
+    CheckTalentsNow(pendingReason or "scheduled")
+  end)
+end
+
+-- -----------------------------
 -- Slash command
 -- -----------------------------
 SLASH_SHORTYTALENTS1 = "/stalent"
@@ -330,22 +350,22 @@ SLASH_SHORTYTALENTS2 = "/stalents"
 SlashCmdList.SHORTYTALENTS = function(msg)
   msg = msg and msg:match("^%s*(.-)%s*$") or ""
 
-if msg == "debug" or msg:match("^debug%s") then
-  local arg = msg:match("^debug%s+(%S+)")
-  if arg == "on" then
-    ST.debug = true
-  elseif arg == "off" then
-    ST.debug = false
-  else
-    ST.debug = not ST.debug
+  if msg == "debug" or msg:match("^debug%s") then
+    local arg = msg:match("^debug%s+(%S+)")
+    if arg == "on" then
+      ST.debug = true
+    elseif arg == "off" then
+      ST.debug = false
+    else
+      ST.debug = not ST.debug
+    end
+    print(string.format("|cff66ccffShortyTalents|r: Debug %s", ST.debug and "ENABLED" or "DISABLED"))
+    ScheduleCheck("slash_debug", 0.01)
+    return
   end
-  print(string.format("|cff66ccffShortyTalents|r: Debug %s", ST.debug and "ENABLED" or "DISABLED"))
-  CheckTalentsNow("slash_debug")
-  return
-end
 
   if msg == "check" then
-    CheckTalentsNow("slash")
+    ScheduleCheck("slash", 0.01)
     return
   end
 
@@ -380,35 +400,35 @@ frame:SetScript("OnEvent", function(_, event, ...)
   end
 
   if event == "PLAYER_ENTERING_WORLD" then
-    CheckTalentsNow("entering_world")
+    ScheduleCheck("entering_world", 0.10)
     return
   end
 
   if event == "ZONE_CHANGED_NEW_AREA" then
-    CheckTalentsNow("zone_changed")
+    ScheduleCheck("zone_changed", 0.10)
     return
   end
 
   if event == "PLAYER_SPECIALIZATION_CHANGED" then
     local unit = ...
     if unit == "player" then
-      CheckTalentsNow("spec_changed")
+      ScheduleCheck("spec_changed", 0.10)
     end
     return
   end
 
   if event == "CHALLENGE_MODE_START" then
-    CheckTalentsNow("mplus_start")
+    ScheduleCheck("mplus_start", 0.10)
     return
   end
 
   if event == "ENCOUNTER_END" then
-    CheckTalentsNow("encounter_end")
+    ScheduleCheck("encounter_end", 0.10)
     return
   end
 
   if event == "TRAIT_CONFIG_UPDATED" or event == "PLAYER_TALENT_UPDATE" then
-    CheckTalentsNow("talents_updated")
+    ScheduleCheck("talents_updated", 0.10)
     return
   end
 end)
