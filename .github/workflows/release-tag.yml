@@ -1,42 +1,74 @@
-name: Release Tag
+name: Build & Release (tagged)
 
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
 
 jobs:
-  build-release:
+  release:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Get version from tag
-        id: vars
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Update TOC version
+      - name: Validate required addon files exist
         run: |
-          sed -i "s/^## Version:.*/## Version: ${{ steps.vars.outputs.VERSION }}/" ShortyTalents.toc
+          set -e
+          test -f "ShortyTalents.toc" || (echo "ERROR: ShortyTalents.toc not found at repo root" && exit 1)
+          test -f "ShortyTalents.lua" || (echo "ERROR: ShortyTalents.lua not found at repo root" && exit 1)
+          test -f "warning.lua" || (echo "ERROR: warning.lua not found at repo root" && exit 1)
+          test -f "options.lua" || (echo "ERROR: options.lua not found at repo root" && exit 1)
+          test -f "ShortyTalents.blp" || (echo "ERROR: ShortyTalents.blp not found at repo root" && exit 1)
 
-      - name: Create addon folder
+      - name: Set TOC version from tag
         run: |
-          mkdir -p build/ShortyTalents
-          cp -r *.lua *.toc build/ShortyTalents/
+          set -e
+          VER="${GITHUB_REF_NAME#v}"   # v0.1.6 -> 0.1.6
+          echo "VER=${VER}" >> $GITHUB_ENV
 
-      - name: Create ZIP archive
+          if grep -qE '^## Version:' ShortyTalents.toc; then
+            sed -i "s/^## Version:.*/## Version: ${VER}/" ShortyTalents.toc
+          else
+            echo "## Version: ${VER}" >> ShortyTalents.toc
+          fi
+
+          echo "TOC version now:"
+          grep -E '^## Version:' ShortyTalents.toc || true
+
+      - name: Stage addon payload (force ShortyTalents folder; exclude repo/dev files)
         run: |
-          cd build
-          zip -r ShortyTalents-${{ steps.vars.outputs.VERSION }}.zip ShortyTalents
+          set -e
+          rm -rf _stage
+          mkdir -p _stage/ShortyTalents
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+          cp -a ShortyTalents.toc _stage/ShortyTalents/
+          cp -a *.lua _stage/ShortyTalents/
+          cp -a ShortyTalents.blp _stage/ShortyTalents/
+
+          find _stage -name ".DS_Store" -delete || true
+          find _stage -name "Thumbs.db" -delete || true
+
+          echo "Staged contents:"
+          ls -lah _stage/ShortyTalents
+
+      - name: Create zip (versioned filename)
+        run: |
+          set -e
+          ZIP_NAME="ShortyTalents-${VER}.zip"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+
+          rm -f "${ZIP_NAME}"
+          (cd _stage && zip -r "../${ZIP_NAME}" ShortyTalents)
+
+          echo "Zip listing:"
+          unzip -l "${ZIP_NAME}" | head -n 80
+
+      - name: Create GitHub Release and upload zip
+        uses: softprops/action-gh-release@v2
         with:
-          files: build/ShortyTalents-${{ steps.vars.outputs.VERSION }}.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: ${{ env.ZIP_NAME }}
+          generate_release_notes: true
