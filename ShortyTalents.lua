@@ -6,7 +6,7 @@ local ST = _G.ShortyTalents or {}
 _G.ShortyTalents = ST
 
 ST.ADDON_NAME = ADDON_NAME
-ST.VERSION = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or ST.VERSION or "0.0.0"
+ST.VERSION = ST.VERSION or "0.0.0"
 
 local frame = CreateFrame("Frame")
 
@@ -30,7 +30,7 @@ local function dprint(...)
 end
 
 -- Cache last known saved loadout per spec (Blizzard can return nil during TRAIT_CONFIG_UPDATED)
-local lastKnownSavedIDBySpec = {}
+local lastKnownSavedIDBySpec = lastKnownSavedIDBySpec or {}
 
 local function DumpSavedConfigsForSpec(specID)
   if not specID or not C_ClassTalents.GetConfigIDsBySpecID then return {} end
@@ -72,18 +72,17 @@ end
 -- -----------------------------
 -- DB
 -- -----------------------------
+local lastKnownSavedConfigID, lastKnownSavedName = nil, nil
 local function EnsureDB()
-  ShortyTalentsDB = type(ShortyTalentsDB) == "table" and ShortyTalentsDB or {}
-  ShortyTalentsDB.spec = type(ShortyTalentsDB.spec) == "table" and ShortyTalentsDB.spec or {} -- keyed by specID number
+  ShortyTalentsDB = ShortyTalentsDB or {}
+  ShortyTalentsDB.spec = ShortyTalentsDB.spec or {} -- keyed by specID number
 end
 
 local function EnsureSpecDB(specID)
   if not specID then return nil end
 
-  EnsureDB()
-
   local specDB = ShortyTalentsDB.spec[specID]
-  if type(specDB) ~= "table" then
+  if not specDB then
     specDB = {
       -- allowed[activity] is a SET of configIDs: allowed[activity][configID] = true
       allowed = {},
@@ -130,39 +129,36 @@ end
 -- GetLastSelectedSavedConfigID even when the UI shows a named loadout.
 local function GetCurrentLoadout()
   local specID = GetCurrentSpecID()
-  if not specID then return nil, nil, false, false, nil, nil end
+  if not specID then return nil, nil, false, false end
 
   local activeID = C_ClassTalents.GetActiveConfigID and C_ClassTalents.GetActiveConfigID() or nil
+  if not activeID then return nil, nil, false, false end
+
+  -- Prefer Blizzard's "last selected saved loadout" when available.
+  -- This matches the configIDs you pick in Options and avoids false Starter/Unsaved warnings
+  -- when the active configID is a different internal ID.
   local lastSavedID = C_ClassTalents.GetLastSelectedSavedConfigID and C_ClassTalents.GetLastSelectedSavedConfigID(specID) or nil
+  if lastSavedID and lastSavedID > 0 then
+    return lastSavedID, (GetConfigName(lastSavedID) or "Unknown"), true, true
+  end
 
-  local activeName = GetConfigName(activeID)
-  local lastSavedName = (lastSavedID and lastSavedID > 0) and GetConfigName(lastSavedID) or nil
+  local name = GetConfigName(activeID)
 
-  -- Determine whether the active config is one of this spec's saved configs.
-  -- Trust the active config first. Last-selected saved loadout can be stale if another addon loads configs.
-  local activeIsSaved = false
-  if activeID and C_ClassTalents.GetConfigIDsBySpecID then
+  -- Determine whether this active config is one of the spec's saved configs
+  local isSaved = false
+  if C_ClassTalents.GetConfigIDsBySpecID then
     local ids = C_ClassTalents.GetConfigIDsBySpecID(specID)
     if type(ids) == "table" then
       for _, id in ipairs(ids) do
         if id == activeID then
-          activeIsSaved = true
+          isSaved = true
           break
         end
       end
     end
   end
 
-  if activeID then
-    return activeID, activeName, activeIsSaved, false, lastSavedID, lastSavedName
-  end
-
-  -- Fallback only when Blizzard does not have an active config ready yet.
-  if lastSavedID and lastSavedID > 0 then
-    return lastSavedID, lastSavedName or "Unknown", true, true, lastSavedID, lastSavedName
-  end
-
-  return nil, nil, false, false, lastSavedID, lastSavedName
+  return activeID, name, isSaved, false
 end
 
 -- -----------------------------
@@ -288,7 +284,25 @@ local function CheckTalentsNow(reason)
     end
   end
 
-  local selectedID, selectedName, isSaved, usedSaved, rawLastSavedID = GetCurrentLoadout()
+  local selectedID, selectedName, isSaved, usedSaved = GetCurrentLoadout()
+
+  -- Race/12.x API guard:
+  -- GetCurrentLoadout() calls GetLastSelectedSavedConfigID() again, and Blizzard can briefly return nil
+  -- during/after TRAIT_CONFIG_UPDATED even though this function already captured or restored a valid saved ID.
+  -- If we have a valid lastSavedID here, use it as the selected saved loadout instead of falsely
+  -- treating the active internal config as Starter/Unsaved.
+  if lastSavedID and lastSavedID > 0 then
+    selectedID = lastSavedID
+    selectedName = lastSavedName or GetConfigName(lastSavedID) or "Unknown"
+    isSaved = true
+    usedSaved = true
+  end
+
+  if not selectedID then
+    dprint("WARNING PATH: selectedID nil -> Unknown Loadout")
+    ST:Warn(activity, "Unknown Loadout", reason)
+    return
+  end
 
   local allowedSet = specDB.allowed[activity]
 
@@ -302,30 +316,19 @@ local function CheckTalentsNow(reason)
     return
   end
 
-  if not selectedID then
-    -- Only fallback to last-selected saved loadout if active config is not available yet.
-    if rawLastSavedID and rawLastSavedID > 0 and IsAllowedID(allowedSet, rawLastSavedID) then
-      dprint("active config nil; fallback lastSelectedSavedID is allowed; no warning.")
-      return
-    end
-
-    dprint("WARNING PATH: selectedID nil -> Unknown Loadout")
-    ST:Warn(activity, "Unknown Loadout", reason)
+  -- If rules exist but player isn't on a saved loadout, warn clearly.
+  -- Only call it Starter/Unsaved when we did NOT have a lastSelectedSavedID to use.
+  if (not isSaved) and (not usedSaved) then
+    ST:Warn(activity, "Starter/Unsaved Build", reason)
     return
   end
 
   if not IsAllowedID(allowedSet, selectedID) then
-    dprint("WARNING PATH: active config not allowed for activity")
-
-    if (not isSaved) and (not usedSaved) then
-      ST:Warn(activity, "Starter/Unsaved Build", reason)
-    else
-      ST:Warn(activity, selectedName or ("ConfigID " .. tostring(selectedID)), reason)
-    end
-    return
+    dprint("WARNING PATH: config not allowed for activity")
+    ST:Warn(activity, selectedName or ("ConfigID " .. tostring(selectedID)), reason)
   end
 
-  dprint("OK: active config allowed; no warning.")
+  dprint("OK: config allowed; no warning.")
 end
 
 ST.CheckTalentsNow = CheckTalentsNow
@@ -335,7 +338,6 @@ ST.CheckTalentsNow = CheckTalentsNow
 -- -----------------------------
 local pendingTimer = nil
 local pendingReason = nil
-local lastCheckAt = 0
 
 local function ScheduleCheck(reason, delay)
   delay = delay or 0.10
@@ -348,14 +350,6 @@ local function ScheduleCheck(reason, delay)
 
   pendingTimer = C_Timer.NewTimer(delay, function()
     pendingTimer = nil
-
-    local now = GetTime()
-    if (now - lastCheckAt) < 0.75 and reason ~= "slash" and reason ~= "slash_debug" then
-      ScheduleCheck(pendingReason or "throttled", 0.75)
-      return
-    end
-
-    lastCheckAt = now
     CheckTalentsNow(pendingReason or "scheduled")
   end)
 end
@@ -446,11 +440,6 @@ frame:SetScript("OnEvent", function(_, event, ...)
     return
   end
 
-  if event == "TRAIT_CONFIG_LIST_UPDATED" then
-    ScheduleCheck("config_list_updated", 0.15)
-    return
-  end
-
   if event == "TRAIT_CONFIG_UPDATED" or event == "PLAYER_TALENT_UPDATE" then
     ScheduleCheck("talents_updated", 0.10)
     return
@@ -464,5 +453,4 @@ frame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 frame:RegisterEvent("CHALLENGE_MODE_START")
 frame:RegisterEvent("ENCOUNTER_END")
 frame:RegisterEvent("TRAIT_CONFIG_UPDATED")
-frame:RegisterEvent("TRAIT_CONFIG_LIST_UPDATED")
 frame:RegisterEvent("PLAYER_TALENT_UPDATE")
