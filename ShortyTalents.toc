@@ -1,4 +1,4 @@
-## Interface: 120000, 120001
+## Interface: 120000, 120001, 120005, 120007
 ## Title: ShortyTalents
 ## Notes: Helps players ensure they are in the correct talent specs for various content types.
 ## Author: ShortyWoW
