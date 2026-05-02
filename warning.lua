@@ -126,7 +126,7 @@ local function EnsureWarnFrame()
 
   WarnFrame.slideIn = WarnFrame.anim:CreateAnimation("Translation")
   WarnFrame.slideIn:SetOffset(0, -16)
-  WarnFrame.slideIn:SetDuration(0.25)
+  WarnFrame.slideIn:SetDuration(20)
   WarnFrame.slideIn:SetSmoothing("OUT")
 
   WarnFrame:SetAlpha(0)
